@@ -450,6 +450,40 @@ class TestLaunchWindowSuccess:
         assert order == ["zsh", "zsh", "agy", "bind"]
         assert mock_sleep.await_count == 2
 
+    @patch(f"{_MODULE}asyncio.sleep", new_callable=AsyncMock)
+    async def test_hookless_agent_timeout_quarantines_without_binding(
+        self, mock_sleep: AsyncMock, tmp_path
+    ) -> None:
+        """A pane that never leaves its launch shell must not be bound.
+
+        Binding would report success while the next poll reads the shell as an
+        exited agent and kills the window.
+        """
+        user_data = {PENDING_THREAD_ID: 42, PENDING_THREAD_TEXT: "hi"}
+        with (
+            _launch_env(launch_command="agy") as m,
+            patch(
+                "ccgram.multiplexer.reconciliation.window_presence",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            m.mux.find_window_by_id = AsyncMock(
+                return_value=SimpleNamespace(pane_current_command="zsh")
+            )
+            result = await launch_window(
+                _make_query(),
+                _make_context(user_data),
+                _request(provider_name="antigravity", cwd=str(tmp_path)),
+            )
+
+        assert not result.success and "still starting" in (result.error_message or "")
+        assert mock_sleep.await_count == 50
+        m.router.commit_topic_provisioning.assert_not_called()
+        m.router.bind_thread.assert_not_called()
+        m.mux.kill_window.assert_not_awaited()
+        assert user_data[PENDING_THREAD_ID] == 42
+
     async def test_hook_provider_does_not_poll_pane_process(self, tmp_path) -> None:
         with _launch_env(supports_hook=True) as m:
             await launch_window(

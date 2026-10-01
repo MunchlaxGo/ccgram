@@ -210,11 +210,14 @@ async def _wait_for_shell_ready(window_id: str, *, attempts: int = 5) -> None:
         await asyncio.sleep(0.2)
 
 
-async def _wait_for_agent_process(window_id: str, *, attempts: int = 50) -> None:
+async def _wait_for_agent_process(window_id: str, *, attempts: int = 50) -> bool:
     """Wait for a hookless agent CLI to replace the shell as the pane's process.
 
     Without this, the first poll sees the launch shell and treats the agent as
-    already exited, killing the window before the CLI has started.
+    already exited, killing the window before the CLI has started. Returns
+    True once a non-shell process owns the pane; False means the pane still
+    shows a launch shell after the whole budget, so the caller must not bind
+    the topic as if the agent had started.
     """
     # Lazy: only needed for hookless providers
     import os
@@ -227,8 +230,9 @@ async def _wait_for_agent_process(window_id: str, *, attempts: int = 50) -> None
         if w and w.pane_current_command:
             cmd = os.path.basename(w.pane_current_command.split()[0]).lstrip("-")
             if cmd not in KNOWN_SHELLS:
-                return
+                return True
         await asyncio.sleep(0.2)
+    return False
 
 
 async def _accept_yolo_confirmation(
@@ -680,10 +684,13 @@ async def launch_window(  # noqa: C901, PLR0911, PLR0912, PLR0915
             map_entry_found = await session_map_sync.wait_for_session_map_entry(
                 created_wid, resolve_window_id=window_query.resolve_window_alias
             )
-        else:
-            if not provider_caps.chat_first_command_path:
-                await _wait_for_agent_process(created_wid)
+        elif provider_caps.chat_first_command_path:
             map_entry_found = True
+        else:
+            # Only a pane that actually left its launch shell may be bound;
+            # a timed-out wait reuses the quarantine path below instead of
+            # reporting success for a window the next poll would kill.
+            map_entry_found = await _wait_for_agent_process(created_wid)
     except BaseException as exc:  # noqa: BLE001
         created_wid = _follow_supersession(created_wid, claim_id=claim_id)
         await _finish_failed_provisioning(
